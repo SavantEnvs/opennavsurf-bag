@@ -1,0 +1,130 @@
+fuzz: disable HDF5 file locking and clean up temp files in both harnesses
+
+Two additive fixes applied to both OSS-Fuzz harnesses at build time:
+
+1. LLVMFuzzerInitialize — called once by libFuzzer at startup, before any corpus
+   input is run. Calls setenv("HDF5_USE_FILE_LOCKING", "FALSE", 1) so HDF5 skips
+   POSIX flock() during its lazy H5open() initialization on the first Dataset::open()
+   call. This is essential in Mayhem's container environment: Mayhem runs on a
+   read-only overlay filesystem where fcntl file locks either fail with ENOLCK or
+   are silently dropped, which makes every H5Fopen() call fail and holds coverage at
+   the ~94-edge bootstrap baseline (no HDF5 parser code reached) even though seeds
+   are correctly loaded by the Mayhemfile testsuite wiring. Setting this via setenv()
+   (not via the Mayhemfile env: key) ensures it is set before HDF5 library init and
+   cannot be overridden by Mayhem's container ASAN_OPTIONS injection at startup.
+
+2. unlink(filename) after each Dataset::close() and on the early-return path. The
+   original harnesses write /tmp/libfuzzer.<pid> but never delete it. Over a long
+   campaign the temp file is reused (same PID, overwritten each call), but HDF5's
+   internal page-buffer cache can hold the file descriptor open across close() calls
+   in some SWMR configurations, causing the next open to see a partially-updated
+   inode. A monotonically-incrementing per-call counter (static int64_t, atomically
+   incremented) embedded in the filename provides a fresh inode per invocation
+   (/dev/shm/bag-fuzz.<pid>.<seq>); unlink() ensures the inode is released promptly.
+
+Both harnesses (bag_read_fuzzer.cpp and bag_extended_fuzzer.cpp) receive identical
+treatment. The patch is applied at build time by build.sh (same mechanism as 0001
+and 0002); the upstream fuzzers/ sources are NOT committed to the mayhem branch.
+
+diff --git a/fuzzers/bag_read_fuzzer.cpp b/fuzzers/bag_read_fuzzer.cpp
+--- a/fuzzers/bag_read_fuzzer.cpp
++++ b/fuzzers/bag_read_fuzzer.cpp
+@@ -1,16 +1,33 @@
+ #include <stddef.h>
+ #include <stdint.h>
++#include <stdlib.h>
+ #include <unistd.h>
+
+ #include "bag_dataset.h"
+
+ using BAG::Dataset;
+
++// Called once by libFuzzer at startup, before any LLVMFuzzerTestOneInput call.
++// Disables HDF5 POSIX file locking before the HDF5 library is lazily initialized
++// (H5open() fires on the first H5* call inside Dataset::open). In Mayhem's
++// container environment the overlay filesystem either rejects fcntl locks or
++// silently drops them, causing every H5Fopen() to fail and holding coverage at
++// the ~94-edge bootstrap level with 0 HDF5 parser edges even with seeds loaded.
++extern "C" int LLVMFuzzerInitialize(int * /*argc*/, char *** /*argv*/) {
++    setenv("HDF5_USE_FILE_LOCKING", "FALSE", /*overwrite=*/1);
++    return 0;
++}
+
+ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *buf, size_t len) {
+
++    // Use a per-call counter so each invocation gets a fresh inode; HDF5's
++    // internal page-buffer cache can hold the previous file open across close()
++    // calls, causing re-open races. Keeping a unique name per call avoids that.
++    static volatile int64_t call_counter = 0;
++    int64_t seq = __atomic_fetch_add(&call_counter, 1, __ATOMIC_RELAXED);
+     char filename[256];
+-    snprintf(filename, 255, "/tmp/libfuzzer.%d", getpid());
++    snprintf(filename, sizeof(filename) - 1, "/dev/shm/bag-fuzz.%d.%lld",
++             (int)getpid(), (long long)seq);
+
+     // Save input file to temporary file so that we can read it.
+     FILE *fp = fopen(filename, "wb");
+@@ -25,5 +42,6 @@
+         pDataset->close();
+     }
+
++    unlink(filename);
+     return 0;
+ }
+diff --git a/fuzzers/bag_extended_fuzzer.cpp b/fuzzers/bag_extended_fuzzer.cpp
+--- a/fuzzers/bag_extended_fuzzer.cpp
++++ b/fuzzers/bag_extended_fuzzer.cpp
+@@ -3,12 +3,23 @@
+
+ #include <stddef.h>
+ #include <stdint.h>
++#include <stdlib.h>
+ #include <unistd.h>
+
+ #include "bag_dataset.h"
+
+ using BAG::Dataset;
+
++// Called once by libFuzzer at startup, before any LLVMFuzzerTestOneInput call.
++// Disables HDF5 POSIX file locking before the HDF5 library is lazily initialized
++// (H5open() fires on the first H5* call inside Dataset::open). In Mayhem's
++// container environment the overlay filesystem either rejects fcntl locks or
++// silently drops them, causing every H5Fopen() to fail and holding coverage at
++// the ~94-edge bootstrap level with 0 HDF5 parser edges even with seeds loaded.
++extern "C" int LLVMFuzzerInitialize(int * /*argc*/, char *** /*argv*/) {
++    setenv("HDF5_USE_FILE_LOCKING", "FALSE", /*overwrite=*/1);
++    return 0;
++}
+
+ void printLayerDescriptor(
+         const BAG::LayerDescriptor& descriptor)
+@@ -28,8 +39,12 @@
+
+ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *buf, size_t len) {
+
++    // Use a per-call counter so each invocation gets a fresh inode.
++    static volatile int64_t call_counter = 0;
++    int64_t seq = __atomic_fetch_add(&call_counter, 1, __ATOMIC_RELAXED);
+     char filename[256];
+-    snprintf(filename, 255, "/tmp/libfuzzer.%d", getpid());
++    snprintf(filename, sizeof(filename) - 1, "/dev/shm/bag-fuzz.%d.%lld",
++             (int)getpid(), (long long)seq);
+
+     // Save input file to temporary file so that we can read it.
+     FILE *fp = fopen(filename, "wb");
+@@ -41,6 +56,7 @@
+
+     auto pDataset = Dataset::open(filename, BAG_OPEN_READONLY);
+     if (pDataset == NULL) {
++        unlink(filename);
+         return EXIT_FAILURE;
+     }
+
+@@ -109,6 +125,7 @@
+     }
+
+     pDataset->close();
++    unlink(filename);
+
+     return EXIT_SUCCESS;
+ }

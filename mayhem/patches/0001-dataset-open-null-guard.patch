@@ -1,0 +1,36 @@
+fuzz: make Dataset::open return null instead of SEGV when H5Fopen fails
+
+BAG::Dataset::readDataset() catches the H5File constructor's FileIException but
+only LOGS it and falls through to `make_unique<Metadata>(*this)` with a null
+m_pH5file. Metadata::Metadata(Dataset&) then calls getH5file() (`return
+*m_pH5file;`) -> h5file.openDataSet(), dereferencing the null-bound reference and
+crashing with a SEGV in bag_metadata.cpp. This happens for EVERY input that is
+not a valid, openable HDF5/BAG file -- including the empty seed libFuzzer starts
+from -- so both OSS-Fuzz harnesses crash on input #0 and the campaign can never
+explore. (Upstream's `fuzzer` branch is trying to fix exactly this:
+"Attempt to catch FileIException in BAG::Dataset::open()".)
+
+Applied at BUILD TIME ONLY (mayhem/build.sh) so the upstream source in the repo
+stays unmodified (the two-branch model keeps all repo changes additive). After
+the existing catch, if the file did not open we throw the same FileIException
+type that Dataset::open() already catches and turns into a `nullptr` return --
+the exact behavior both harnesses are written to expect.
+
+diff --git a/api/bag_dataset.cpp b/api/bag_dataset.cpp
+index 730d442..1fa837e 100644
+--- a/api/bag_dataset.cpp
++++ b/api/bag_dataset.cpp
+@@ -1108,6 +1108,13 @@ void Dataset::readDataset(
+         e.printErrorStack();
+     }
+
++    // mayhem: if H5Fopen failed above, m_pH5file is null; constructing Metadata
++    // (which calls getH5file() -> *m_pH5file) would dereference null and SEGV.
++    // Rethrow so Dataset::open()'s catch returns nullptr, the contract both
++    // OSS-Fuzz harnesses already handle.
++    if (!m_pH5file)
++        throw ::H5::FileIException{"Dataset::readDataset", "unable to open file"};
++
+     m_pMetadata = std::make_unique<Metadata>(*this);
+
+     m_descriptor = Descriptor{*m_pMetadata};

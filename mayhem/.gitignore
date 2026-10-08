@@ -1,0 +1,4 @@
+# CMake build trees written by mayhem/build.sh. Ignored so the rlenv grader's `git clean -ffdX`
+# removes their configure state (CMakeCache.txt, compiler paths, flags) (SPEC §6.2 item 16).
+/build/
+/build-tests/

@@ -1,0 +1,4 @@
+# Seed corpora are binary BAG/HDF5 files — never apply the repo-root `* text=auto eol=lf`
+# normalization to them (it would corrupt the seeds on checkout on some platforms).
+testsuite/** -text -diff
+*.dict -text
