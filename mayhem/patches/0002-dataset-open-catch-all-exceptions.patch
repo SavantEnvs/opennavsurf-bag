@@ -1,0 +1,47 @@
+fuzz: make Dataset::open return null for any exception from readDataset
+
+BAG::Dataset::open() only catches H5::FileIException. Several BAG files
+that are structurally valid HDF5 but have unexpected or missing attributes
+cause BAG::Metadata::Metadata() (called from readDataset) to throw
+BAG::ErrorLoadingMetadata or H5::AttributeIException. These exceptions
+propagate uncaught through Dataset::open() into LLVMFuzzerTestOneInput,
+which has no catch block, causing std::terminate() and immediate fuzzer
+exit with 0 edges.
+
+Affected seeds (confirmed locally):
+  metadata_layer_example.bag  -> H5::AttributeIException
+  nominal_only.bag            -> BAG::ErrorLoadingMetadata
+  true_n_nominal.bag          -> BAG::ErrorLoadingMetadata
+
+The fix adds a catch-all clause immediately after the existing
+H5::FileIException catch in Dataset::open(). Any exception from
+readDataset() is now caught and the function returns nullptr, which is
+exactly the return value both harnesses already handle:
+
+    auto pDataset = Dataset::open(filename, BAG_OPEN_READONLY);
+    if (pDataset != NULL) { ... }   // bag_read_fuzzer.cpp line 24
+
+Applied at BUILD TIME ONLY (mayhem/build.sh) so the upstream source in
+the repo stays unmodified (the two-branch model keeps all changes additive).
+
+diff --git a/api/bag_dataset.cpp b/api/bag_dataset.cpp
+index 730d442..1f31bab 100644
+--- a/api/bag_dataset.cpp
++++ b/api/bag_dataset.cpp
+@@ -277,6 +277,16 @@ std::shared_ptr<Dataset> Dataset::open(
+         std::cerr << "\nUnable to open BAG file: " << fileName << " due to error: " << fileExcept.getCDetailMsg();
+         return nullptr;
+     }
++    // mayhem: BAG::Metadata::Metadata() (called from readDataset) can throw
++    // BAG::ErrorLoadingMetadata or H5::AttributeIException for BAG files that are
++    // valid HDF5 but have unexpected/missing attributes. These propagate uncaught
++    // through LLVMFuzzerTestOneInput, causing std::terminate() and 0-edge runs.
++    // Catch everything here and return nullptr -- the same contract both harnesses
++    // already handle for the H5::FileIException case above.
++    catch (...)
++    {
++        return nullptr;
++    }
+
+     return pDataset;
+ }

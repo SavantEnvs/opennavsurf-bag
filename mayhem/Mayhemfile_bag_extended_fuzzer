@@ -1,0 +1,12 @@
+project: savantenvs/opennavsurf-bag
+target: bag_extended_fuzzer
+testsuite:
+  - https://$MAYHEM_DOMAIN/$MAYHEM_PROJECT/$MAYHEM_TARGET/testsuite.tar
+  - file://mayhem/bag_extended_fuzzer/testsuite
+cmds:
+  - cmd: /mayhem/bag_extended_fuzzer
+    libfuzzer: true
+    dictionary: /mayhem/mayhem/bag_extended_fuzzer.dict
+    env:
+      HDF5_USE_FILE_LOCKING: "FALSE"
+    cwd: /dev/shm
